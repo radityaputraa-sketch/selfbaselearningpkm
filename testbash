@@ -1,0 +1,65 @@
+cd /home/claude/vibris && pip install numpy scipy --break-system-packages -q && python3 -c "
+from vibris_main import VibrisDatabase, FeatureExtractor, AnomalyDetector, SensorManager
+import numpy as np
+
+print('=== TEST VIBRIS SELF-BASELINE LEARNING ===')
+
+db = VibrisDatabase('/tmp/vibris_test.db')
+sensor = SensorManager()
+extractor = FeatureExtractor()
+detector = AnomalyDetector()
+
+# Simulasi rekam baseline (mesin sehat)
+print('\n[1] Rekam baseline mesin sehat...')
+raw_baseline = sensor.record_vibration(2)  # 2 detik untuk test
+features_baseline = extractor.extract(raw_baseline)
+baseline_id = db.save_baseline('motor_test', 'Motor Test 200W', features_baseline)
+print(f'    Baseline tersimpan, ID={baseline_id}')
+print(f'    RMS: {features_baseline[\"vib_rms\"]:.4f}g')
+print(f'    FFT Peak: {features_baseline[\"fft_peak1_hz\"]:.1f} Hz')
+
+# Load baseline
+bl = db.get_baseline('motor_test')
+
+# Test diagnosa mesin NORMAL (sinyal sama)
+print('\n[2] Diagnosa mesin NORMAL...')
+raw_normal = sensor.record_vibration(2)
+feat_normal = extractor.extract(raw_normal)
+result_normal = detector.compare(bl, feat_normal)
+result_normal['mesin_id'] = 'motor_test'
+result_normal['baseline_id'] = baseline_id
+db.save_diagnosis(result_normal)
+print(f'    Verdict: {result_normal[\"verdict\"]} (skor={result_normal[\"score_total\"]:.3f}σ)')
+
+# Test diagnosa mesin RUSAK (simulasi)
+print('\n[3] Diagnosa mesin ANOMALI (simulasi bearing fault)...')
+# Manipulasi sinyal: tambah kurtosis tinggi dan high-freq energy
+t = np.linspace(0, 2, 2000)
+# Sinyal bearing fault: impulsif + high freq
+ax_fault = (0.5*np.sin(2*np.pi*50*t) + 
+            1.5*np.sin(2*np.pi*350*t) +  # high freq komponen
+            np.random.normal(0, 0.3, len(t)))  # noise tinggi
+raw_fault = {
+    'ax': ax_fault, 'ay': ax_fault*0.5, 
+    'az': 1 + ax_fault*0.2,
+    'temp': np.full(len(t), 65.0),  # suhu tinggi
+    'audio': np.random.normal(0, 0.4, len(t)),
+    'sample_rate': 1000, 'duration': 2.0, 'n_samples': len(t)
+}
+feat_fault = extractor.extract(raw_fault)
+result_fault = detector.compare(bl, feat_fault)
+result_fault['mesin_id'] = 'motor_test'
+result_fault['baseline_id'] = baseline_id
+db.save_diagnosis(result_fault)
+print(f'    Verdict: {result_fault[\"verdict\"]} (skor={result_fault[\"score_total\"]:.3f}σ)')
+print(f'    Jenis kerusakan: {result_fault[\"fault_type\"]}')
+
+# Tampilkan riwayat
+print('\n[4] Riwayat diagnosa:')
+history = db.get_diagnosis_history('motor_test')
+for h in history:
+    icon = {'NORMAL': '✓', 'WARNING': '⚠', 'DANGER': '✗'}.get(h['verdict'], '?')
+    print(f'    {icon} {h[\"verdict\"]:8s} | {h[\"fault_type\"]:15s} | skor={h[\"score_total\"]:.3f}σ')
+
+print('\n=== SEMUA TEST BERHASIL ===')
+"
