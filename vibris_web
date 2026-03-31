@@ -1,0 +1,596 @@
+"""
+VIBRIS Web Dashboard
+Antarmuka web untuk VIBRIS yang bisa diakses dari browser di jaringan lokal.
+Berjalan di Raspberry Pi, diakses dari HP/laptop via WiFi.
+
+Jalankan: python vibris_web.py
+Akses: http://<ip-raspberry-pi>:5000
+"""
+
+from flask import Flask, render_template_string, jsonify, request
+import sqlite3
+import json
+from pathlib import Path
+
+app = Flask(__name__)
+DB_PATH = Path("/home/pi/vibris_database.db")
+
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VIBRIS Dashboard</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0a0a1e; color: #e0e0f0; font-family: 'Courier New', monospace; }
+  .header { background: #141430; border-bottom: 2px solid #5090ff;
+            padding: 15px 25px; display: flex; align-items: center; gap: 15px; }
+  .logo { font-size: 1.8em; font-weight: bold; color: #5090ff; }
+  .subtitle { color: #8080a0; font-size: 0.85em; }
+  .container { max-width: 1100px; margin: 0 auto; padding: 20px; }
+  .card { background: #141430; border: 1px solid #2a2a50;
+          border-radius: 12px; padding: 20px; margin-bottom: 20px; }
+  .card-title { color: #5090ff; font-size: 1.1em; margin-bottom: 15px;
+                border-bottom: 1px solid #2a2a50; padding-bottom: 8px; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 15px; }
+  .btn { padding: 10px 20px; border-radius: 8px; cursor: pointer;
+         font-family: inherit; font-size: 0.9em; border: 2px solid; }
+  .btn-primary { background: transparent; color: #5090ff; border-color: #5090ff; }
+  .btn-success { background: transparent; color: #00dc78; border-color: #00dc78; }
+  .btn-danger  { background: transparent; color: #ff3c3c; border-color: #ff3c3c; }
+  .btn:hover { background: rgba(255,255,255,0.05); }
+  .verdict-NORMAL  { color: #00dc78; }
+  .verdict-WARNING { color: #ffc800; }
+  .verdict-DANGER  { color: #ff3c3c; }
+  .stat-box { background: #0e0e28; border-radius: 8px; padding: 12px; text-align: center; }
+  .stat-val { font-size: 1.6em; font-weight: bold; }
+  .stat-lbl { color: #8080a0; font-size: 0.75em; margin-top: 4px; }
+  input, select { background: #0e0e28; color: #e0e0f0; border: 1px solid #3a3a60;
+                  border-radius: 6px; padding: 8px 12px; font-family: inherit;
+                  font-size: 0.9em; width: 100%; margin-bottom: 10px; }
+  label { color: #8080a0; font-size: 0.8em; display: block; margin-bottom: 4px; }
+  .progress-bar { background: #1e1e40; border-radius: 10px; height: 20px;
+                  overflow: hidden; margin: 10px 0; }
+  .progress-fill { height: 100%; border-radius: 10px; transition: width 0.3s;
+                   background: linear-gradient(90deg, #5090ff, #00dc78); }
+  .score-bar { display: flex; align-items: center; gap: 10px; margin: 6px 0; }
+  .score-label { width: 90px; color: #8080a0; font-size: 0.8em; }
+  .score-track { flex: 1; height: 12px; background: #1e1e40; border-radius: 6px; overflow: hidden; }
+  .score-fill { height: 100%; border-radius: 6px; }
+  .history-row { display: flex; justify-content: space-between; align-items: center;
+                 padding: 10px; border-bottom: 1px solid #1e1e40; font-size: 0.85em; }
+  .history-row:last-child { border-bottom: none; }
+  .machine-tag { background: #1e1e40; border-radius: 4px; padding: 2px 8px;
+                 font-size: 0.75em; color: #5090ff; }
+  .status-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block;
+                margin-right: 6px; }
+  .status-NORMAL  { background: #00dc78; }
+  .status-WARNING { background: #ffc800; }
+  .status-DANGER  { background: #ff3c3c; }
+  #recording-panel { display: none; }
+  #result-panel { display: none; }
+  .alert { padding: 12px; border-radius: 8px; margin-bottom: 15px; font-size: 0.9em; }
+  .alert-info { background: #0e1e40; border: 1px solid #5090ff; color: #5090ff; }
+  .alert-success { background: #0e2818; border: 1px solid #00dc78; color: #00dc78; }
+  .alert-danger { background: #280e0e; border: 1px solid #ff3c3c; color: #ff3c3c; }
+  .fft-canvas { width: 100%; height: 120px; background: #0a0a1e;
+                border: 1px solid #2a2a50; border-radius: 6px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="logo">⚡ VIBRIS</div>
+  <div>
+    <div style="font-size:1.1em">Vibration-Based Rotating machine Intelligent System</div>
+    <div class="subtitle">Self-Baseline Learning · FFT Analytics · Edge Computing</div>
+  </div>
+  <div style="margin-left:auto; text-align:right">
+    <div id="live-time" style="font-size:0.8em; color:#5090ff"></div>
+    <div id="hw-status" style="font-size:0.75em; color:#8080a0">● Terhubung</div>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- STATISTIK RINGKAS -->
+  <div class="grid-3" style="margin-bottom:20px">
+    <div class="stat-box">
+      <div class="stat-val" id="stat-machines" style="color:#5090ff">-</div>
+      <div class="stat-lbl">Mesin Terdaftar</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-val" id="stat-diagnoses" style="color:#00dc78">-</div>
+      <div class="stat-lbl">Total Diagnosa</div>
+    </div>
+    <div class="stat-box">
+      <div class="stat-val" id="stat-anomalies" style="color:#ffc800">-</div>
+      <div class="stat-lbl">Anomali Terdeteksi</div>
+    </div>
+  </div>
+
+  <div class="grid-2">
+
+    <!-- PANEL KIRI: AKSI -->
+    <div>
+      <!-- Form rekam baseline -->
+      <div class="card">
+        <div class="card-title">📡 Rekam Baseline (Mesin Sehat)</div>
+        <div class="alert alert-info">
+          💡 Pasang VIBRIS ke mesin dalam kondisi NORMAL, lalu tekan Rekam.
+        </div>
+        <label>ID Mesin</label>
+        <input type="text" id="baseline-machine-id" placeholder="contoh: motor_blender_01">
+        <label>Nama Mesin</label>
+        <input type="text" id="baseline-machine-name" placeholder="contoh: Blender Dapur UMKM">
+        <label>Durasi Rekam (detik)</label>
+        <input type="number" id="baseline-duration" value="60" min="30" max="300">
+        <button class="btn btn-primary" onclick="startBaseline()" style="width:100%">
+          ⬤ MULAI REKAM BASELINE
+        </button>
+      </div>
+
+      <!-- Form diagnosa -->
+      <div class="card">
+        <div class="card-title">🔍 Diagnosa Mesin</div>
+        <div class="alert alert-info">
+          💡 Pilih mesin yang mau diperiksa, tempel VIBRIS, lalu tekan Diagnosa.
+        </div>
+        <label>Pilih Mesin</label>
+        <select id="diag-machine-id">
+          <option value="">-- Pilih Mesin --</option>
+        </select>
+        <label>Durasi Rekam (detik)</label>
+        <input type="number" id="diag-duration" value="120" min="60" max="300">
+        <button class="btn btn-success" onclick="startDiagnosis()" style="width:100%">
+          🔍 MULAI DIAGNOSA
+        </button>
+      </div>
+    </div>
+
+    <!-- PANEL KANAN: STATUS & HASIL -->
+    <div>
+      <!-- Panel recording -->
+      <div class="card" id="recording-panel">
+        <div class="card-title" id="rec-mode-title">📡 Merekam...</div>
+        <div id="rec-elapsed" style="color:#e0e0f0; margin-bottom:8px">0 / 0 detik</div>
+        <div class="progress-bar">
+          <div class="progress-fill" id="rec-progress" style="width:0%"></div>
+        </div>
+        <div id="rec-vib" style="color:#5090ff; font-size:0.9em">Getaran: --</div>
+        <canvas id="fft-canvas" class="fft-canvas" style="margin-top:10px"></canvas>
+        <div style="color:#8080a0; font-size:0.8em; margin-top:8px" id="rec-status">
+          Inisialisasi sensor...
+        </div>
+      </div>
+
+      <!-- Panel hasil -->
+      <div class="card" id="result-panel">
+        <div class="card-title">📊 Hasil Diagnosa</div>
+        <div style="display:flex; align-items:center; gap:15px; margin-bottom:15px">
+          <div style="font-size:2.5em" id="result-icon">-</div>
+          <div>
+            <div style="font-size:1.5em; font-weight:bold" id="result-verdict">-</div>
+            <div style="color:#8080a0; font-size:0.85em" id="result-fault">-</div>
+          </div>
+          <div style="margin-left:auto; text-align:right">
+            <div style="font-size:1.2em; font-weight:bold" id="result-score">-</div>
+            <div style="color:#8080a0; font-size:0.75em">Skor Total (σ)</div>
+          </div>
+        </div>
+        <div id="result-scores"></div>
+        <div style="color:#8080a0; font-size:0.75em; margin-top:10px" id="result-confidence"></div>
+      </div>
+
+      <!-- Riwayat diagnosa -->
+      <div class="card">
+        <div class="card-title">📜 Riwayat Diagnosa Terbaru</div>
+        <div id="history-list">
+          <div style="color:#8080a0; text-align:center; padding:20px">
+            Belum ada riwayat
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Daftar mesin -->
+  <div class="card">
+    <div class="card-title">🖥️ Mesin Terdaftar</div>
+    <div id="machines-list"></div>
+  </div>
+
+</div>
+
+<script>
+// ═══════════════════════════
+// State
+// ═══════════════════════════
+let recording = false;
+let recordTimer = null;
+let fftCtx = null;
+
+// ═══════════════════════════
+// Init
+// ═══════════════════════════
+window.onload = () => {
+  fftCtx = document.getElementById('fft-canvas').getContext('2d');
+  setInterval(updateClock, 1000);
+  loadDashboard();
+  setInterval(loadDashboard, 10000);
+};
+
+function updateClock() {
+  document.getElementById('live-time').textContent =
+    new Date().toLocaleTimeString('id-ID');
+}
+
+async function loadDashboard() {
+  const [stats, machines, history] = await Promise.all([
+    fetch('/api/stats').then(r => r.json()),
+    fetch('/api/machines').then(r => r.json()),
+    fetch('/api/history').then(r => r.json()),
+  ]);
+
+  document.getElementById('stat-machines').textContent = stats.machines;
+  document.getElementById('stat-diagnoses').textContent = stats.diagnoses;
+  document.getElementById('stat-anomalies').textContent = stats.anomalies;
+
+  // Dropdown mesin
+  const sel = document.getElementById('diag-machine-id');
+  sel.innerHTML = '<option value="">-- Pilih Mesin --</option>';
+  machines.forEach(m => {
+    sel.innerHTML += `<option value="${m.mesin_id}">${m.nama_mesin} (${m.mesin_id})</option>`;
+  });
+
+  // Daftar mesin
+  const ml = document.getElementById('machines-list');
+  if (machines.length === 0) {
+    ml.innerHTML = '<div style="color:#8080a0;padding:15px">Belum ada mesin. Rekam baseline terlebih dahulu.</div>';
+  } else {
+    ml.innerHTML = machines.map(m => `
+      <div class="history-row">
+        <span class="machine-tag">${m.mesin_id}</span>
+        <span style="flex:1; margin-left:12px">${m.nama_mesin}</span>
+        <span style="color:#8080a0; font-size:0.8em">
+          Baseline: ${m.n_baselines}× | Terakhir: ${m.last_baseline?.substring(0,16) || '-'}
+        </span>
+        <button class="btn btn-success" style="padding:4px 12px; font-size:0.75em; margin-left:10px"
+          onclick="quickDiagnose('${m.mesin_id}')">Diagnosa</button>
+      </div>
+    `).join('');
+  }
+
+  // Riwayat
+  const hl = document.getElementById('history-list');
+  if (history.length === 0) {
+    hl.innerHTML = '<div style="color:#8080a0; text-align:center; padding:20px">Belum ada riwayat</div>';
+  } else {
+    hl.innerHTML = history.map(h => {
+      const icon = {NORMAL:'✓', WARNING:'⚠', DANGER:'✗'}[h.verdict] || '?';
+      const clr  = {NORMAL:'#00dc78', WARNING:'#ffc800', DANGER:'#ff3c3c'}[h.verdict] || '#fff';
+      return `
+        <div class="history-row">
+          <span class="status-dot status-${h.verdict}"></span>
+          <span style="color:${clr}; width:70px">${icon} ${h.verdict}</span>
+          <span class="machine-tag">${h.mesin_id}</span>
+          <span style="flex:1; margin-left:10px; color:#8080a0; font-size:0.8em">${h.fault_type}</span>
+          <span style="color:#8080a0; font-size:0.8em">${h.score_total?.toFixed(2)}σ</span>
+          <span style="color:#5050a0; font-size:0.75em; margin-left:10px">${h.diagnosed_at?.substring(0,16)}</span>
+        </div>
+      `;
+    }).join('');
+  }
+}
+
+// ═══════════════════════════
+// Baseline
+// ═══════════════════════════
+async function startBaseline() {
+  const machineId   = document.getElementById('baseline-machine-id').value.trim();
+  const machineName = document.getElementById('baseline-machine-name').value.trim();
+  const duration    = parseInt(document.getElementById('baseline-duration').value);
+
+  if (!machineId || !machineName) {
+    alert('ID dan Nama Mesin harus diisi!');
+    return;
+  }
+  if (recording) {
+    alert('Sedang merekam, tunggu selesai!');
+    return;
+  }
+
+  showRecordingPanel('REKAM BASELINE', duration);
+
+  try {
+    const res = await fetch('/api/record_baseline', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({mesin_id: machineId, nama_mesin: machineName, durasi: duration})
+    });
+    const data = await res.json();
+    stopRecordingPanel();
+    if (data.success) {
+      showAlert('✓ Baseline tersimpan! ID: ' + data.baseline_id, 'success');
+      loadDashboard();
+    } else {
+      showAlert('Error: ' + data.error, 'danger');
+    }
+  } catch (e) {
+    stopRecordingPanel();
+    showAlert('Koneksi error: ' + e.message, 'danger');
+  }
+}
+
+// ═══════════════════════════
+// Diagnosa
+// ═══════════════════════════
+async function startDiagnosis() {
+  const machineId = document.getElementById('diag-machine-id').value;
+  const duration  = parseInt(document.getElementById('diag-duration').value);
+  if (!machineId) { alert('Pilih mesin terlebih dahulu!'); return; }
+  if (recording)  { alert('Sedang merekam!'); return; }
+
+  await runDiagnosis(machineId, duration);
+}
+
+async function quickDiagnose(machineId) {
+  if (recording) { alert('Sedang merekam!'); return; }
+  await runDiagnosis(machineId, 120);
+}
+
+async function runDiagnosis(machineId, duration) {
+  showRecordingPanel('DIAGNOSA', duration);
+  try {
+    const res = await fetch('/api/diagnose', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({mesin_id: machineId, durasi: duration})
+    });
+    const data = await res.json();
+    stopRecordingPanel();
+    if (data.success) {
+      showResult(data.result);
+      loadDashboard();
+    } else {
+      showAlert('Error: ' + (data.error || 'Unknown'), 'danger');
+    }
+  } catch (e) {
+    stopRecordingPanel();
+    showAlert('Koneksi error: ' + e.message, 'danger');
+  }
+}
+
+// ═══════════════════════════
+// UI Helper
+// ═══════════════════════════
+function showRecordingPanel(mode, total) {
+  recording = true;
+  document.getElementById('recording-panel').style.display = 'block';
+  document.getElementById('result-panel').style.display = 'none';
+  document.getElementById('rec-mode-title').textContent = '● ' + mode;
+
+  let elapsed = 0;
+  recordTimer = setInterval(() => {
+    elapsed++;
+    const pct = Math.min(100, (elapsed / total) * 100);
+    document.getElementById('rec-elapsed').textContent = `${elapsed} / ${total} detik`;
+    document.getElementById('rec-progress').style.width = pct + '%';
+    document.getElementById('rec-vib').textContent =
+      `Getaran RMS: ${(0.4 + Math.random()*0.2).toFixed(4)} g`;
+    document.getElementById('rec-status').textContent =
+      elapsed < total * 0.2 ? 'Memanaskan sensor...' :
+      elapsed < total * 0.8 ? 'Mengambil sampel...' : 'Memproses FFT...';
+    drawFakeFFT(elapsed);
+  }, 1000);
+}
+
+function stopRecordingPanel() {
+  recording = false;
+  clearInterval(recordTimer);
+}
+
+function showResult(result) {
+  document.getElementById('result-panel').style.display = 'block';
+  const icons = {NORMAL:'✅', WARNING:'⚠️', DANGER:'🚨'};
+  const colors = {NORMAL:'#00dc78', WARNING:'#ffc800', DANGER:'#ff3c3c'};
+  const faultLabels = {
+    normal:'Kondisi Normal', bearing_fault:'Kerusakan Bearing',
+    unbalance:'Ketidakseimbangan Massa', misalignment:'Misalignment Poros',
+    anomali_umum:'Anomali Terdeteksi'
+  };
+  const v = result.verdict;
+  document.getElementById('result-icon').textContent = icons[v] || '?';
+  document.getElementById('result-verdict').textContent = v;
+  document.getElementById('result-verdict').style.color = colors[v];
+  document.getElementById('result-fault').textContent = faultLabels[result.fault_type] || result.fault_type;
+  document.getElementById('result-score').textContent = result.score_total?.toFixed(2) + 'σ';
+  document.getElementById('result-score').style.color = colors[v];
+  document.getElementById('result-confidence').textContent =
+    `Tingkat keyakinan: ${(result.confidence * 100).toFixed(0)}%`;
+
+  const comps = [
+    ['Getaran',  result.score_vibration],
+    ['Frekuensi', result.score_frequency],
+    ['Suhu',      result.score_thermal],
+    ['Akustik',   result.score_acoustic],
+  ];
+  const sc = document.getElementById('result-scores');
+  sc.innerHTML = comps.map(([label, score]) => {
+    const pct = Math.min(100, (score / 5) * 100);
+    const clr = score < 1.5 ? '#00dc78' : score < 2.5 ? '#ffc800' : '#ff3c3c';
+    return `
+      <div class="score-bar">
+        <span class="score-label">${label}</span>
+        <div class="score-track">
+          <div class="score-fill" style="width:${pct}%; background:${clr}"></div>
+        </div>
+        <span style="width:50px; text-align:right; color:${clr}; font-size:0.8em">
+          ${score?.toFixed(2)}σ
+        </span>
+      </div>
+    `;
+  }).join('');
+}
+
+function showAlert(msg, type) {
+  const al = document.createElement('div');
+  al.className = `alert alert-${type}`;
+  al.textContent = msg;
+  document.querySelector('.container').prepend(al);
+  setTimeout(() => al.remove(), 5000);
+}
+
+function drawFakeFFT(t) {
+  const canvas = document.getElementById('fft-canvas');
+  const ctx = fftCtx;
+  const W = canvas.width = canvas.offsetWidth;
+  const H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#0a0a1e';
+  ctx.fillRect(0, 0, W, H);
+  ctx.strokeStyle = '#5090ff';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let x = 0; x < W; x++) {
+    const f = (x / W) * 500;
+    let amp = 0;
+    amp += 20 * Math.exp(-Math.pow(f - 50, 2) / 100) + Math.random() * 3;
+    amp += 10 * Math.exp(-Math.pow(f - 100, 2) / 200) + Math.random() * 2;
+    amp += 5  * Math.exp(-Math.pow(f - 200, 2) / 500) + Math.random() * 1;
+    const y = H - (amp / 28) * H;
+    x === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  // Label sumbu
+  ctx.fillStyle = '#5050a0';
+  ctx.font = '10px monospace';
+  ctx.fillText('0', 2, H-2);
+  ctx.fillText('250Hz', W/2 - 15, H-2);
+  ctx.fillText('500Hz', W - 35, H-2);
+}
+</script>
+</body>
+</html>
+"""
+
+# ═══════════════════════════════════════════════════════════
+# API ENDPOINTS
+# ═══════════════════════════════════════════════════════════
+
+@app.route("/")
+def index():
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route("/api/stats")
+def api_stats():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    machines  = cur.execute("SELECT COUNT(DISTINCT mesin_id) FROM baselines").fetchone()[0]
+    diagnoses = cur.execute("SELECT COUNT(*) FROM diagnoses").fetchone()[0]
+    anomalies = cur.execute(
+        "SELECT COUNT(*) FROM diagnoses WHERE verdict != 'NORMAL'"
+    ).fetchone()[0]
+    conn.close()
+    return jsonify({"machines": machines, "diagnoses": diagnoses, "anomalies": anomalies})
+
+@app.route("/api/machines")
+def api_machines():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT mesin_id, nama_mesin, MAX(created_at) as last_baseline,
+               COUNT(*) as n_baselines
+        FROM baselines GROUP BY mesin_id ORDER BY last_baseline DESC
+    """)
+    rows = [{"mesin_id": r[0], "nama_mesin": r[1],
+             "last_baseline": r[2], "n_baselines": r[3]}
+            for r in cur.fetchall()]
+    conn.close()
+    return jsonify(rows)
+
+@app.route("/api/history")
+def api_history():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT mesin_id, diagnosed_at, verdict, fault_type,
+               score_total, confidence
+        FROM diagnoses ORDER BY diagnosed_at DESC LIMIT 20
+    """)
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+    return jsonify(rows)
+
+@app.route("/api/record_baseline", methods=["POST"])
+def api_record_baseline():
+    """Endpoint untuk trigger rekam baseline dari web UI."""
+    data       = request.json
+    mesin_id   = data.get("mesin_id", "").strip()
+    nama_mesin = data.get("nama_mesin", "").strip()
+    durasi     = int(data.get("durasi", 60))
+
+    if not mesin_id or not nama_mesin:
+        return jsonify({"success": False, "error": "ID dan Nama Mesin harus diisi"})
+
+    try:
+        # Import controller utama
+        import importlib.util, sys
+        spec = importlib.util.spec_from_file_location(
+            "vibris_main",
+            Path(__file__).parent / "vibris_main.py"
+        )
+        mod = importlib.util.load_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        ctrl = mod.VibrisController()
+        baseline_id = ctrl.record_baseline(mesin_id, nama_mesin, durasi)
+        return jsonify({"success": True, "baseline_id": baseline_id})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+@app.route("/api/diagnose", methods=["POST"])
+def api_diagnose():
+    """Endpoint untuk trigger diagnosa dari web UI."""
+    data     = request.json
+    mesin_id = data.get("mesin_id", "").strip()
+    durasi   = int(data.get("durasi", 120))
+
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "vibris_main",
+            Path(__file__).parent / "vibris_main.py"
+        )
+        mod = importlib.util.util.load_from_spec(spec) if False else None
+
+        # Langsung import
+        sys_path = str(Path(__file__).parent)
+        import sys
+        if sys_path not in sys.path:
+            sys.path.insert(0, sys_path)
+
+        from vibris_main import VibrisController
+        ctrl   = VibrisController()
+        result = ctrl.diagnose_machine(mesin_id, durasi)
+
+        if "error" in result:
+            return jsonify({"success": False, "error": result["error"]})
+
+        # Bersihkan numpy types untuk JSON serialization
+        clean = {k: float(v) if hasattr(v, '__float__') else v
+                 for k, v in result.items()
+                 if k != "features"}
+        return jsonify({"success": True, "result": clean})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+if __name__ == "__main__":
+    print("VIBRIS Web Dashboard berjalan di http://0.0.0.0:5000")
+    app.run(host="0.0.0.0", port=5000, debug=False)
